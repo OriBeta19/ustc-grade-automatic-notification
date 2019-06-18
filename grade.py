@@ -2,113 +2,87 @@
 # -*- coding: utf-8 -*-
 
 from bs4 import BeautifulSoup
-from newknn import Captcha
-import urllib, urllib2, cookielib, os, zlib, time, getpass, sys
+import requests,time,os,json
 from mail import send_email
-from config import *
 
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US; rv:1.9.1.6) Gecko/20091201 Firefox/3.5.6'
+
+postUrl = 'https://passport.ustc.edu.cn/login?service=https%3A%2F%2Fjw.ustc.edu.cn%2Fucas-sso%2Flogin'
+postHeaders = {
+    'Accept':
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3',
+    'Accept-Language': 'zh',
+    'Connection': 'keep-alive',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.12 Safari/537.36 Edg/76.0.182.6',
+    'Referer':
+    'https://passport.ustc.edu.cn/login?service=https%3A%2F%2Fjw.ustc.edu.cn%2Fucas-sso%2Flogin',
+    'Connection': 'keep-alive'
 }
-cookie_support = urllib2.HTTPCookieProcessor(cookielib.CookieJar())
-opener = urllib2.build_opener(cookie_support, urllib2.HTTPHandler)
-urllib2.install_opener(opener)
+
+def login(postData):
+    sessionRequests = requests.session()
+    sessionRequests.post(url=postUrl, headers=postHeaders, data=postData)
+    return sessionRequests
 
 
-def login():
-    captcha = Captcha()
-    has_login = False
-    while not has_login:
-        print 'Trying to login...'
-        req = urllib2.Request(
-            url='http://mis.teach.ustc.edu.cn/',
-            headers=headers
-        )
-        urllib2.urlopen(req, timeout=req_timeout).read()
-        req = urllib2.Request(
-            url='http://mis.teach.ustc.edu.cn/randomImage.do',
-            headers=headers
-        )
-        content = urllib2.urlopen(req, timeout=req_timeout).read()
-        code = captcha.hack(content)
-        print 'Recognized captcha code:', code
-        postdata = urllib.urlencode({
-            'userbz': 's',
-            'hidjym': '',
-            'userCode': student_no,
-            'passWord': ustcmis_password,
-            'check': code
-        })
-        req = urllib2.Request(
-            url='http://mis.teach.ustc.edu.cn/login.do',
-            data=postdata,
-            headers=headers
-        )
-        result = urllib2.urlopen(req, timeout=req_timeout).read()
-        # print result
-        if "alert" in result:
-            print 'Login incorrect!'
-        else:
-            has_login = True
-            print 'Login OK!'
-
-
-def get_grade():
-    req = urllib2.Request(
-        url='http://mis.teach.ustc.edu.cn/initfqcjxx.do?tjfs=1',
-        headers=headers
-    )
-    return urllib2.urlopen(req, timeout=req_timeout).read()
-
-
-def parse_grade(grade):
-    soup = BeautifulSoup(grade, "html5lib")
-    # for i,line in enumerate(soup.find_all('tr')):
-    #    for j,elem in enumerate(line.find_all('td')):
-    #        print 'line=',i,' row=',j,' ',elem.get_text().encode('utf-8')
-    flag = 0
+def parseGrade(grade):
+    soup = BeautifulSoup(grade)
     rows = soup.find_all('tr')
     data = []
     for row in rows:
         elems = row.find_all('td')
-        if len(elems) == 7:
-            if flag:
-                data.append([td.get_text() for td in elems])
-            flag = 1
+        if len(elems) == 6:
+            subGrade = [td.get_text() for td in elems]
+            data.append([subGrade[0]] + subGrade[3:6])
     return data
 
 
-olddata = []
-first_run = True
-while True:
-    print 'Query...'
-    try:
-        grade = get_grade()
-        if "userinit" in grade:
-            print 'Not login.'
-            login()
-            continue
-        data = parse_grade(grade)
-        print time.strftime('%Y-%m-%d %X', time.localtime(time.time())), 'Count :', len(data)
-        test_mail = False
-        if first_run:
-            ans = raw_input('Send test email? (y/n)')
-            if ans.lower() in ['', 'y', 'yes']:
-                test_mail = True
-        if len(data) != len(olddata) and not first_run or test_mail:
-            text = ' , '.join(row[2] + ' ' + row[3] for row in data if row not in olddata)
-            if test_mail:
-                text = 'Test email. ' + text
-            print 'Sending mail...'
-            print 'Text:', text.encode('utf8')
-            if enable_mail:
-                send_email(text, text.encode('utf-8'))
-            print 'Mail sent.'
-        olddata = data
-        first_run = False
-    except Exception as e:
-        if not isinstance(e, KeyboardInterrupt):
-            print time.strftime('%Y-%m-%d %X', time.localtime(time.time())), 'Error:', str(e)
-        else:
-            break
-    time.sleep(interval)
+def getGrade(sessionRequests):
+    sheet = sessionRequests.get(url='https://jw.ustc.edu.cn/for-std/grade/sheet')
+    soupSheet = BeautifulSoup(sheet.text)
+    realUrl = 'https://jw.ustc.edu.cn' + soupSheet.find('form').get('action')
+    semesters = soupSheet.find_all('option')
+    data = []
+    for semester in semesters[1:len(semesters)]:
+        grade = sessionRequests.get(realUrl + '?semester=' + semester.get('value'))
+        semesterData = parseGrade(grade.text)
+        semesterData.insert(0, semester.string)
+        data.append(semesterData)
+    return data
+
+
+def writeMail(data, newGradeNumber):
+    mailContent = '<div>您有' + str(newGradeNumber) + '门新成绩，分别为：</div>'
+    for subject in data[0][1:newGradeNumber + 1]:
+        mailContent += '<div>    ' + subject[0] + '(' + subject[1] + '学分):总评=' + subject[3]
+        if subject[2] != ' ':
+            mailContent += ',GPA=' + subject[2]
+        mailContent += '</div>'
+
+    def calcGPA(gradeData):
+        point = 0
+        credit = 0
+        for subject in gradeData:
+            if subject[2] == ' ':
+                continue
+            credit += float(subject[1])
+            point += float(subject[2]) * float(subject[1])
+        return [point, credit]
+
+    GPA = []
+    for semester in data:
+        GPA.append(calcGPA(semester[1:len(semester)]))
+    if GPA[0][1] != 0:
+        mailContent += '<div>您本学期平均绩点为' + '%.2f' % (GPA[0][0] / GPA[0][1]) + '</div>'
+    totalPoint = 0
+    totalCredit = 0
+    for semester in GPA:
+        totalPoint += semester[0]
+        totalCredit += semester[1]
+    if totalCredit != 0:
+        mailContent += '<div>您截至目前'+str(len(GPA))+'学期总平均绩点为' + '%.2f' % (totalPoint / totalCredit) + '</div>'
+    return mailContent
+
+
+
